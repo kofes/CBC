@@ -4,7 +4,17 @@
 #include <map>
 #include <list>
 
-#define DEBUG
+//#define DEBUG
+
+enum class ERROR_CODE: int {
+    NORM = 0,
+
+    NOT_SET_INPUT = 1 << 0,
+    WRONG_INPUT = 1 << 1,
+
+    NOT_SET_OUTPUT = 1 << 2,
+    WRONG_OUTPUT = 1 << 3,
+};
 
 int serialize_args(int argc, char* argv[], std::map<std::string, std::list<std::string>>& smap) {
 #ifdef DEBUG
@@ -33,17 +43,17 @@ int serialize_args(int argc, char* argv[], std::map<std::string, std::list<std::
     return 0;
 }
 
-int set_input(
+ERROR_CODE set_input(
         const std::map<std::string, std::list<std::string>>& smap,
         std::ifstream& fin, const std::string& keyword
 ) {
     bool keyword_exits = smap.find(keyword) != smap.end();
-    if (!keyword_exits) return 1;
+    if (!keyword_exits) return ERROR_CODE::NOT_SET_INPUT;
 
     const std::list<std::string>& strvalues = smap.at(keyword);
 
     for (const std::string& value: strvalues) {
-        fin.open(value);
+        fin.open(value, std::ios::binary);
         if (fin.is_open()) {
 #ifdef DEBUG
             std::cout << "DEBUG: input filename: " << value << std::endl;
@@ -55,20 +65,20 @@ int set_input(
 #endif
     }
 
-    return !fin.is_open();
+    return (!fin.is_open() ? ERROR_CODE::WRONG_INPUT : ERROR_CODE::NORM);
 }
 
-int set_output(
+ERROR_CODE set_output(
         const std::map<std::string, std::list<std::string>>& smap,
         std::ofstream& fout, const std::string& keyword
 ) {
     bool keyword_exits = smap.find(keyword) != smap.end();
-    if (!keyword_exits) return 1;
+    if (!keyword_exits) return ERROR_CODE::NOT_SET_OUTPUT;
 
     const std::list<std::string>& strvalues = smap.at(keyword);
 
     for (const std::string& value: strvalues) {
-        fout.open(value);
+        fout.open(value, std::ios::binary);
         if (fout.is_open()) {
 #ifdef DEBUG
             std::cout << "DEBUG: output filename: " << value << std::endl;
@@ -80,7 +90,7 @@ int set_output(
 #endif
     }
 
-    return !fout.is_open();
+    return (!fout.is_open() ? ERROR_CODE::WRONG_OUTPUT : ERROR_CODE::NORM);
 }
 
 static const size_t ONE_MB = 1 << 20;
@@ -160,6 +170,36 @@ int set_mode(
     return 0;
 }
 
+int set_deadcount(
+        const std::map<std::string, std::list<std::string>>& smap,
+        size_t& dead_count, const std::string& keyword
+) {
+    dead_count = 0;
+
+    bool keyword_exits = smap.find(keyword) != smap.end();
+    if (!keyword_exits) return 0;
+
+    const std::list<std::string>& strvalues = smap.at(keyword);
+
+    for (const std::string& value: strvalues) {
+        std::stringstream buffer(value);
+        buffer >> dead_count;
+        if (dead_count) {
+#ifdef DEBUG
+            std::cout << "DEBUG: block size: " << dead_count << std::endl;
+#endif
+            break;
+        }
+#ifdef DEBUG
+        std::cout << "DEBUG: zero block size" << std::endl;
+#endif
+    }
+
+    return 0;
+}
+
+#include "CBC.h"
+
 using namespace std;
 
 /**
@@ -173,24 +213,42 @@ using namespace std;
  * - sign - sign input file & write it to output file
  * - check - check input file for sign
  * - unsign - unsign input file & write it to output file
- * last option has higher priority (if it valueable)
+ * dc=%count dead bytes% - set count of not used bytes at end of signed file
+ * last option[non zero] has higher priority (if it valueable)
  */
 
 int main(int argc, char* argv[]) {
     ifstream fin;
     ofstream fout;
     size_t buffer_size;
+    size_t dead_count;
     CBC_MODE mode;
     map<string, list<string>> smap;
 
-    int err_code = serialize_args(argc, argv, smap) ||
-            set_mode(smap, mode, "mode") ||
-            set_input(smap, fin, "if") ||
+    int err_code = serialize_args(argc, argv, smap) |
+            set_mode(smap, mode, "mode") |
+            (int)set_input(smap, fin, "if") |
             set_bs(smap, buffer_size, "bs");
     if (mode != CBC_MODE::CHECK)
-        err_code |= set_output(smap, fout, "of");
+        err_code |= (int)set_output(smap, fout, "of");
+    if (mode == CBC_MODE::UNSIGN)
+        err_code |= set_deadcount(smap, dead_count, "dc");
 
-    if (err_code) return err_code;
+    if (err_code) {
+        if (err_code & (int)ERROR_CODE::NOT_SET_OUTPUT)
+            std::cout << "output file not set" << std::endl;
+        if (err_code & (int)ERROR_CODE::NOT_SET_INPUT)
+            std::cout << "input file not set" << std::endl;
+        if (err_code & (int)ERROR_CODE::WRONG_INPUT)
+            std::cout << "wrong input filename set" << std::endl;
+        if (err_code & (int)ERROR_CODE::WRONG_OUTPUT)
+            std::cout << "wrong output filename set" << std::endl;
+        return err_code;
+    }
 
-    return 0;
+    switch (mode) {
+        case CBC_MODE::SIGN: return CBC::sign(fin, fout, buffer_size);
+        case CBC_MODE::CHECK: return CBC::check(fin, buffer_size);
+        case CBC_MODE::UNSIGN: return CBC::unsign(fin, fout, buffer_size, dead_count);
+    }
 }
